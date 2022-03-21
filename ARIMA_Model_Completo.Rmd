@@ -1,0 +1,447 @@
+---
+title: "ARIMA"
+author: "Jacopo Nicosia"
+date: "7/25/2021"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libreries and Data Import
+
+Here we set the split between training and validation set (3 months worth of data for the validation set).
+
+```{r, warning=FALSE, message=FALSE}
+
+library("xts")
+library("forecast")
+library('Metrics')
+library('tseries')
+#library('aTSA')
+
+setwd("C:\\Users\\jacop\\Desktop\\Time Series\\Progetto Jaco")
+dt <- read.csv('Dati_orari.csv')
+
+dt$date <- as.Date(as.character(dt$date), format = "%m/%d/%Y")
+
+dt_train <- dt[dt$date <= '2020-05-30',]
+dt_val <- dt[dt$date > '2020-05-30',]
+
+```
+
+
+# Exploratory analysis (Iterated)
+
+In this first phase it's presented the process of exploration of the 24 time series.
+
+It has been noticed the absence of two dates. The problem has been fixed in the data source by averaging the value recorded in the hour before and after.
+
+```{r, warning=FALSE, message=FALSE}
+
+y <- xts(dt_train$h14/10000, as.Date(as.character(dt_train$date), format = "%Y-%m-%d"))
+y_val <- xts(dt_val[15]/10000, as.Date(as.character(dt_val$date)))
+
+ggAcf(y, lag.max = 366)
+ggPacf(y, lag.max = 366)
+
+plot(diff(y,7))
+
+adf.test(y, k=7)
+
+ggAcf(diff(y,7))
+ggPacf(diff(y,7))
+
+```
+
+From the graphs presented above it is possible to notice a strong autocorrelation.
+
+For this reason one Integration is performed and the stationarity tested (and confirmed) through the ADF test.
+
+By zooming on the ACF and PACF after the Integration it is possible to evaluate the starting ARIMA model for this time series.
+- The first 4 lags of the ACF breaking through the confidence band suggest an MA(4)
+- In the PACF it is possible to notice a strong correlation with the first lag, but also a seasonality that occurs every 7 lags, suggesting an AR(1) and AR(1)[7]
+
+# Matrix Creation (Dummy vectors and Sinusoids)
+
+In this step some dummy variables and the sinusoids are created. 
+The goal is to add this components to some advanced models in order to improve the performance of the basic Arima, by modelling some steps and particular events through the dummies and the seasonality with the sinusoids.
+
+```{r,warning=FALSE,message=FALSE}
+# Seasonal Dummies
+days <- seq(from=as.Date('2018-09-01'), to=as.Date("2020-10-31"),by='days' )
+
+covid <- as.numeric(days > "2020-02-01")
+
+# Training Matrix
+
+tempo <- 1:nrow(dt_train)
+vj <- 1:8 # AIC uguale tra 8 e 16, 3 peggio
+
+freq <- outer(tempo, vj) * 2 * pi / 365.25 
+
+x <- cbind(cos(freq), sin(freq))
+
+colnames(x) <- c(paste0("cos", vj), paste0("sin",vj))
+
+X <- cbind(x,covid[0:638])
+
+# Validation Matrix
+
+tempo1 <- 1:nrow(dt_val)
+
+freq1 <- outer(tempo1, vj) * 2 * pi / 365.25  
+
+x1 <- cbind(cos(freq1), sin(freq1))
+
+colnames(x1) <- colnames(x)
+
+X1 <- cbind(x1,covid[639:731])
+
+```
+
+# Models and Validation
+
+In the following chunk it is possible to see the model resulting from the analysis performed a couple of chuncks above.
+
+Some external components (the dummy variables and the sinusoids) are also included.
+
+```{r,warning=FALSE,message=FALSE}
+# Arima (1,0,4)(0,1,1)[7]
+mod1 <- Arima(y, c(1,0,4), 
+              list(order=c(0,1,1), period = 7),
+              xreg = X)
+mod1
+
+ggAcf(mod1$residuals, lag.max = 100)
+ggPacf(mod1$residuals, lag.max = 100)
+
+plot(forecast(mod1 , xreg= X1, h = nrow(dt_val)),include = 365) # , xreg= X1
+a <- forecast(mod1 , xreg= X1, h = nrow(dt_val))
+a1 <- xts(a$mean, as.Date(as.character(dt_val$date)))
+
+plot(xts(dt_val[15]/10000, as.Date(as.character(dt_val$date))))
+lines(a1,col='red')
+
+mae(a1,y_val)
+
+```
+
+Watching the ACF and PACF of the residuals it still seems like there is some kind of seasonality every 14-21 days that we are missing. 
+
+After many attempts of fixing the problem, which are not reported in this notebook, it seems reasonable to continue with this kind of model for the next steps.
+
+
+# Hourly-Based Models
+
+In the following chuck it is possible to see a customization of the model for each hour.
+
+The analysis of the ACF, PACF and residuals has been performed to each of the 24 time series available in order to pick the best performing model.
+
+```{r,warning=FALSE,message=FALSE}
+
+modelli <- list()
+
+for (i in 2:25) {
+  
+  y <- xts(dt_train[[i]]/10000, as.Date(as.character(dt_train$date), format = "%Y-%m-%d"))
+  
+  if ((i >= 2) & (i <= 4)){
+      mod <- Arima(y, c(3,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+
+  if (i == 5){
+      mod <- Arima(y, c(2,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+  if (i == 6){
+      mod <- Arima(y, c(3,0,3), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+
+  if (i == 7){
+      mod <- Arima(y, c(1,0,3), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+
+  if (i == 8){
+      mod <- Arima(y, c(1,0,5), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+  
+  if ((i == 9) & (i == 10)){
+      mod <- Arima(y, c(1,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+  
+  if (i == 11){
+      mod <- Arima(y, c(1,0,5), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+  
+  if (i == 12){
+      mod <- Arima(y, c(3,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+  
+  if (i == 13){
+      mod <- Arima(y, c(1,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+
+  if ((i >= 14) & (i <= 17)){
+      mod <- Arima(y, c(1,0,2), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+
+  if ((i >= 18) & (i <= 20)){
+      mod <- Arima(y, c(1,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+  
+  if ((i == 21) & (i == 22)){
+      mod <- Arima(y, c(4,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+
+  if ((i >= 23) & (i <= 25)){
+      mod <- Arima(y, c(3,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X)  
+  }
+  
+  modelli[[i - 1]] <- mod
+}
+
+```
+
+# MAE
+
+After training 24 separate models, the resulting MAEs are averaged out.
+
+```{r,warning=FALSE}
+d <- 0 
+
+for (i in 1:24){
+  
+  a <- forecast(modelli[[i]], xreg = X1, h = nrow(dt_val$date))$mean
+  
+  a1 <- xts(a, as.Date(as.character(dt_val$date)))
+  
+  b1 <- xts(dt_val[i+1]/10000, as.Date(as.character(dt_val$date)))
+  
+  c <- mae(a1,b1)
+  
+  d <- sum(d,c)
+}
+
+FinalMAE <- (d/24)*10000
+
+FinalMAE
+
+```
+
+# Total Training Preparation
+
+Now that all the preparation steps are completed, it is possible to proceed with the training with all the available data and the prediction of the future 61 records.
+
+```{r,warning=FALSE,message=FALSE}
+# Training Matrix
+
+tempo2 <- 1:nrow(dt)
+vj <- 1:8 # AIC uguale tra 8 e 16, 3 peggio
+
+freq2 <- outer(tempo2, vj) * 2 * pi / 365.25 
+
+x2 <- cbind(cos(freq2), sin(freq2))
+
+colnames(x2) <- colnames(x)
+
+X2 <- cbind(x2,covid[0:731])
+
+# Prediction Matrix
+
+tempo3 <- 1:61
+
+freq3 <- outer(tempo3, vj) * 2 * pi / 365.25 
+
+x3 <- cbind(cos(freq3), sin(freq3))
+
+colnames(x3) <- colnames(x)
+
+X3 <- cbind(x3,covid[732:792])
+
+```
+
+# Total Training
+```{r,warning=FALSE,message=FALSE}
+
+modelli1 <- list()
+
+for (i in 2:25) {
+  
+  y <- xts(dt[[i]]/10000, as.Date(as.character(dt$date), format = "%Y-%m-%d"))
+  
+    if ((i >= 2) & (i <= 4)){
+      mod <- Arima(y, c(3,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+
+  if (i == 5){
+      mod <- Arima(y, c(2,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+  if (i == 6){
+      mod <- Arima(y, c(3,0,3), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+
+  if (i == 7){
+      mod <- Arima(y, c(1,0,3), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+
+  if (i == 8){
+      mod <- Arima(y, c(1,0,5), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+  
+  if ((i == 9) & (i == 10)){
+      mod <- Arima(y, c(1,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+  
+  if (i == 11){
+      mod <- Arima(y, c(1,0,5), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+  
+  if (i == 12){
+      mod <- Arima(y, c(3,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+  
+  if (i == 13){
+      mod <- Arima(y, c(1,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+
+  if ((i >= 14) & (i <= 17)){
+      mod <- Arima(y, c(1,0,2), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+
+  if ((i >= 18) & (i <= 20)){
+      mod <- Arima(y, c(1,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+  
+  if ((i == 21) & (i == 22)){
+      mod <- Arima(y, c(4,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+
+  if ((i >= 23) & (i <= 25)){
+      mod <- Arima(y, c(3,0,4), 
+                 list(order=c(0,1,1), period = 7),
+                 xreg = X2)  
+  }
+  
+  modelli1[[i - 1]] <- mod
+}
+
+```
+
+# Prediction Dataframe Preparation
+
+In order to store the data in the requested format, a new structure is required.
+
+```{r,warning=FALSE,message=FALSE}
+
+days <- seq(from=as.Date('2020-09-01'), to=as.Date("2020-10-31"),by='days' )
+
+days1 <- data.frame(days)
+
+ore_iter <- rep(c(1:24),times=61)
+
+k <- 0
+
+for (i in seq_along(days)){
+  k <- append(k,rep(days[i], times=24))
+}
+
+df1 <- data.frame(as.Date(k[-1]))
+df1 <- cbind(df1,ore_iter)
+colnames(df1) <- c('date','ora')
+
+```
+
+# Forecast & Storage
+```{r,warning=FALSE,message=FALSE}
+
+for (i in 1:24){
+  
+  a <- forecast(modelli1[[i]], xreg = X3, h = nrow(as.Date(unique(days1$days))))$mean
+  
+  ARIMA <- xts(a * 10000, as.Date(as.character(unique(days1$days))))
+  
+  df45 <- data.frame(Y=as.matrix(ARIMA), date=time(ARIMA))
+  
+  # rownames(df45) <- 1:nrow(df45)
+  
+  ora <- rep((i),times=nrow(df45))
+  
+  df45 <- cbind(df45,ora)
+  
+  df1 <- merge(x = df1, y = df45, all = TRUE)
+  
+  }
+
+df1 <- na.omit(df1)
+
+# df1 to CSV
+
+```
+
+```{r, echo=FALSE}
+
+#write.csv(df1, file = 'SDMTSA_861812.csv')
+
+```
+
+# Final MAE:
+
+$Arima: 621650.9$
+
+$UCM: 356025.4$
+
+$ML-KNN: 563666.9$

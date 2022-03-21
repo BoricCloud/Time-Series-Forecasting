@@ -1,0 +1,417 @@
+---
+title: "UCM Models"
+author: "Jacopo Nicosia"
+date: "7/25/2021"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE,message=FALSE, echo = FALSE}
+
+# Libraries & data import
+
+library("xts")
+library('Metrics')
+library('tseries')
+library("dplyr")
+library("xts")
+library("forecast")
+library("urca")
+library("lmtest")
+library("KFAS")
+library("fastDummies")
+
+setwd("C:\\Users\\jacop\\Desktop\\Time Series\\Progetto Jaco")
+dt <- read.csv('Dati_orari.csv')
+
+dt$date <- as.Date(as.character(dt$date), format = "%m/%d/%Y")
+
+dt_train <- dt[dt$date <= '2020-05-30',]
+dt_val <- dt[dt$date > '2020-05-30',]
+
+```
+
+# Data Import
+
+Train-validation set split.
+
+```{r,warning=FALSE,message=FALSE}
+
+y <- xts(dt_train$h14/10000, as.Date(as.character(dt_train$date), format = "%Y-%m-%d"))
+y_val <- xts(dt_val$h14/10000, as.Date(as.character(dt_val$date), format = "%Y-%m-%d"))
+
+```
+
+
+# Model 1
+
+The first analyzed model is a simple LLT. Its purpose is mainly to set a benchmark to compare future models.
+
+```{r,warning=FALSE,message=FALSE}
+
+mod1 <- SSModel(y ~ SSMtrend(2, list(NA, NA)), H = NA)
+
+vr <- var(y)
+
+fit <- fitSSM(mod1, inits = log(c(vr/10,vr/100,vr/2)))
+
+fit$optim.out
+
+fit$model$Q
+
+```
+# Prediction & Evaluation
+
+```{r}
+
+pred1 <- predict(fit$model, n.ahead = 93, interval = "prediction")
+
+mae1 <- mean(abs(as.vector(y_val) - pred1))
+mae1
+
+```
+As expected the Mean Absolute Error is significantly high. Obviously the model is too simple to explain the selected time series.
+
+# Results Evaluation
+```{r,warning=FALSE,message=FALSE}
+
+kfs1<-KFS(fit$model, 
+          filtering = c('state','signal'),
+          smoothing = c("state", "signal","disturbance"))
+
+ares <- rstandard(kfs1,"state")
+plot(ares[,"level"])
+
+```
+
+
+```{r , fig.width=10, fig.height=6, fig.align='center', echo=FALSE }
+
+plot(y)
+lines(xts(kfs1$att[,"level"], time(y)), col = "red")
+
+plot(xts(kfs1$att[,"slope"], time(y)), col = "blue")
+
+```
+Thanks to the Kalman Filter is it possible to observe that the time series variability is strongly dependent on the level variability, while the slope stays pretty mich constant.
+
+# Model 2
+
+The following model is much more complex since it includes two types of seasonal components.
+- A weekly seasonality, which it is modelled through dummy variables
+- A semi-annual seasonality modelled through trigonometric functions (it has been noticed that a small number of harmonics return models with lower MAE)
+
+```{r}
+
+mod2 <- SSModel(as.vector(y) ~ SSMtrend(2, list(NA, NA))+
+                      SSMseasonal(7, NA, "dummy") + 
+                      SSMseasonal(365, NA, "trig", harmonics = 1:5),
+                     H = NA)
+
+vr2 <- var(as.vector(y))
+
+mod2$P1inf <- mod2$P1inf * 0 # Valori di inizializzazione
+mod2$a1[1] <- mean(y)
+diag(mod2$P1) <- vr2
+
+
+pars_2 <- numeric(5)
+
+pars_2[1] <- log(vr2/10)       # Level
+pars_2[2] <- log(vr2/100)       # Slope
+pars_2[3] <- log(vr2/1000)      # Seasonal dummy
+pars_2[4] <- log(vr2/1000)      # Seasonal trig
+pars_2[5] <- log(vr2/5)       # Obs error
+
+  # Funzione di update
+updt_2 <- function(pars, model){
+    # Level
+    model$Q[1, 1, 1] <- exp(pars[1])
+    # Slope
+    model$Q[2, 2, 1] <- exp(pars[2])
+    # Seasonal Dummy
+    model$Q[3, 3, 1] <- exp(pars[3])
+    # Seasonal Sinusoids (number of harmonics*2 + 3)
+    diag(model$Q[4:13, 4:13,1]) <- exp(pars[4])
+    # Observation 
+    model$H[1, 1, 1] <- exp(pars[5])
+    model
+}
+
+
+```
+
+
+
+```{r,warning=FALSE,message=FALSE}
+
+fit2 <-  fitSSM(mod2, pars_2, updt_2)
+fit2$optim.out$convergence # if 0, the model has reached convergence
+
+```
+
+
+```{r,warning=FALSE,message=FALSE}
+
+pred2 <- predict(fit2$model, n.ahead = 93)
+
+```
+
+In the following chunk the different components of the model are visualized for evaluation purposes.
+
+```{r, fig.width=10, fig.height=6, fig.align='center', echo=FALSE }
+
+kfs1 <- KFS(fit2$model, smoothing = c("state", "signal", "disturbance"))
+
+
+level <- kfs1$alphahat[, "level"]
+trig <- kfs1$alphahat[, "sea_trig1"]
+
+plot(as.vector(y), type = "l", 
+     ylim = c(min(as.vector(y), kfs1$alphahat[, "level"], kfs1$alphahat[, "slope"]), 
+              max(as.vector(y), kfs1$alphahat[, "level"], kfs1$alphahat[, "slope"])))
+lines(kfs1$alphahat[, "level"], col = "blue")
+lines(kfs1$alphahat[, "slope"], col = "red", lwd = 2)
+lines(kfs1$alphahat[, "sea_dummy1"] + level + trig, col = "green", lwd = 2)
+lines(kfs1$alphahat[, "sea_trig1"] + level , col = "purple", lwd = 2)
+
+```
+
+It seems that the trigonometric component is much more adaptive then desired. It could be a solution to reduce even more the number of harmonics.
+
+```{r, fig.width=10, fig.height=6, fig.align='center', echo=FALSE }
+
+plot(y_val)
+lines(xts(pred2, time(y_val)), col = "red", lwd = 1)
+
+```
+
+
+```{r,warning=FALSE}
+
+mae_ucm2 <- mean(abs(as.vector(y_val) - pred2))
+mae_ucm2
+
+```
+
+# Model 3
+
+In this model the number of harmonics is reduced even further.
+
+```{r,warning=FALSE,message=FALSE}
+
+mod3 <- SSModel(as.vector(y) ~ SSMtrend(2, list(NA, NA))+
+                      SSMseasonal(7, NA, "dummy") + 
+                      SSMseasonal(365, 0, "trig", harmonics = 1:3),
+                     H = NA)
+
+vr3 <- var(as.vector(y))
+
+mod3$P1inf <- mod3$P1inf * 0
+mod3$a1[1] <- mean(y)
+diag(mod3$P1) <- vr3
+
+
+```
+
+
+```{r,warning=FALSE}
+
+fit3 <-  fitSSM(mod3, pars_2)
+fit3$optim.out$convergence
+
+```
+
+```{r,warning=FALSE,message=FALSE}
+
+pred3 <- predict(fit3$model, n.ahead = 93)
+
+```
+
+```{r,warning=FALSE}
+
+mae_ucm2 <- mean(abs(as.vector(y_val) - pred3))
+mae_ucm2
+
+```
+The improvement obtained by reducing the number of harmonics even more is significant.
+The previous MAE was $60.94352$ against a new one of $47.29854$.
+For this reason the model is trained for each hourly time series.
+
+# Hourly based Final Models
+```{r,warning=FALSE,message=FALSE}
+
+modelli <- list()
+
+for (i in 2:25) {
+  
+  y <- xts(dt_train[[i]]/10000, as.Date(as.character(dt_train$date), format = "%Y-%m-%d"))
+  vr <- var(as.vector(y))
+  
+  mod0 <- SSModel(as.vector(y) ~ SSMtrend(2, list(NA, NA))+
+                      SSMseasonal(7, NA, "dummy") + 
+                      SSMseasonal(365, 0, "trig", harmonics = 1:3),
+                     H = NA)
+
+  mod0$P1inf <- mod0$P1inf * 0 
+  mod0$a1[1] <- mean(y)
+  diag(mod0$P1) <- vr
+  
+  pars_0 <- numeric(5)
+  
+  pars_0[1] <- log(vr/100)       # Level
+  pars_0[2] <- log(vr/1000)       # Slope
+  pars_0[3] <- log(vr/1000)      # Seasonal dummy
+  pars_0[4] <- log(vr/1000)      # Seasonal trig
+  pars_0[5] <- log(vr/5)       # Obs error 
+
+  fit0 <-  fitSSM(mod0, pars_0)
+  
+  modelli[[i - 1]] <- fit0
+}
+  
+
+```
+
+# Final MAE
+
+Likewise to Arima models, to check that everything went smoothly the average of the 24 MAEs is calculated.
+
+```{r,warning=FALSE}
+
+d <- 0
+
+for (i in 1:24){
+  
+  pred0 <- predict(modelli[[i]]$model, n.ahead = 93)
+  
+  ts <- xts(pred0, time(y_val))
+  
+  b1 <- xts(dt_val[i+1]/10000, as.Date(as.character(dt_val$date)))
+  
+  c <- mae(ts,b1)
+  
+  d <- sum(d,c)
+}
+
+FinalMAE <- (d/24)*10000
+
+FinalMAE
+
+```
+
+# Final Training
+```{r,warning=FALSE,message=FALSE}
+
+modelli <- list()
+
+for (i in 2:25) {
+  
+  y <- xts(dt[[i]]/10000, as.Date(as.character(dt$date), format = "%Y-%m-%d"))
+  vr <- var(as.vector(y))
+  
+  mod0 <- SSModel(as.vector(y) ~ SSMtrend(2, list(NA, NA))+
+                      SSMseasonal(7, NA, "dummy") + 
+                      SSMseasonal(365, 0, "trig", harmonics = 1:3),
+                     H = NA)
+
+  mod0$P1inf <- mod0$P1inf * 0 ##### Parametri importanti, capire perchè!
+  mod0$a1[1] <- mean(y)
+  diag(mod0$P1) <- vr
+  
+  pars_1 <- numeric(5)
+  
+  pars_1[1] <- log(vr/100)       # Level
+  pars_1[2] <- log(vr/1000)       # Slope
+  pars_1[3] <- log(vr/1000)      # Seasonal dummy
+  pars_1[4] <- log(vr/1000)      # Seasonal trig
+  pars_1[5] <- log(vr/5)       # Obs error 
+  
+  fit0 <-  fitSSM(mod0, pars_1)
+  
+  modelli[[i - 1]] <- fit0
+}
+  
+
+```
+
+# Prediction Dataframe Preparation
+
+The following steps are the same already performed for the Arima Model.
+
+```{r,warning=FALSE,message=FALSE}
+
+days <- seq(from=as.Date('2020-09-01'), to=as.Date("2020-10-31"),by='days' )
+
+days1 <- data.frame(days)
+
+ore_iter <- rep(c(1:24),times=61)
+
+k <- 0
+
+for (i in seq_along(days)){
+  k <- append(k,rep(days[i], times=24))
+}
+
+df1 <- data.frame(as.Date(k[-1]))
+df1 <- cbind(df1,ore_iter)
+colnames(df1) <- c('date','ora')
+
+```
+
+# Storage
+```{r,warning=FALSE,message=FALSE}
+
+for (i in 1:24){
+  
+  pred0 <- predict(modelli[[i]]$model, n.ahead =61)
+  
+  UCM <- xts(pred0 * 10000, as.Date(as.character(unique(days1$days))))
+  
+  df45 <- data.frame(Y=as.matrix(UCM), date=time(UCM))
+  
+  ora <- rep((i),times=nrow(df45))
+  
+  df45 <- cbind(df45,ora)
+  
+  df1 <- merge(x = df1, y = df45, all = TRUE)
+  
+  }
+
+df1 <- na.omit(df1)
+
+# df1 to CSV
+
+```
+
+
+```{r, echo=FALSE}
+
+Dati <- read.csv("C:\\Users\\jacop\\Desktop\\Time Series\\Progetto Jaco\\SDMTSA_861812.csv")
+Dati$date <- as.Date(as.character(Dati$date), format = "%m/%d/%Y")
+
+```
+
+
+```{r, echo=FALSE}
+#DFF <- cbind(Dati,df1$fit,ML)
+#colnames(DFF) <- c("Data", "Ora", "ARIMA", "UCM", "ML")
+#write.csv2(DFF, file = 'SDMTSA_861812_FIN.csv')
+
+```
+
+# Final MAE:
+
+$Arima: 621650.9$
+
+$UCM: 356025.4$
+
+$ML-KNN: 563666.9$
+
+

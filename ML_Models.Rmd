@@ -1,0 +1,369 @@
+---
+title: "ML_Model"
+author: "Jacopo Nicosia"
+date: "7/25/2021"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE, echo = FALSE}
+
+#install.packages("keras")
+library("keras")
+#install_keras(tensorflow = "gpu")
+library("xts")
+library("timeDate")
+library("reticulate")
+```
+
+Differently from as seen in Arima and UCM Models, with the ML approach it has been decided to use the time series as is, meaning the the hourly data has been kept without splitting into 24 different time series.
+
+# Data Import
+```{r, warning=FALSE, message=FALSE}
+
+dt <- read.csv("C:\\Users\\jacop\\Desktop\\Time Series\\TrainingSetClean.csv")
+
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+ds <- dt
+val <- c(mean(ds$VALORE), sd(ds$VALORE))
+ds$VALORE <- (ds$VALORE - val[1])/val[2]
+
+datalags <- 30
+train <- ds[seq(16082 + datalags), ]
+validation <- ds[16082 + datalags + seq(1462 + datalags), ]
+
+x.train <- array(data = lag(ds$VALORE, datalags)[-(1:datalags) ], dim = c(nrow(train) - datalags, datalags, 1))
+y.train <- array(data = train$VALORE[-(1:datalags)], dim = c(nrow(train)-datalags, 1))
+
+x.validation <- array(data = lag(ds$VALORE, datalags)[-(1:datalags) ], dim = c(nrow(validation) - datalags, datalags, 1))
+y.validation <- array(data = ds$VALORE[-(1:datalags)], dim = c(nrow(validation) - datalags, 1))
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+
+y <- xts(dt$VALORE, as.Date(dt$DATA), frequency = 24)
+plot(y)
+
+y_train <- y
+y_validation <- y
+
+y_train <- y["/2020-05-31"]
+y_validation <- y["2020-06-01/"]
+
+ts <- dt$VALORE # a copy of the original ts
+
+```
+
+# KNN
+
+# Parameters setting
+
+Here the preparation step for the KNN classifier are set. After some attempts K = 5 seemed the one that returned the best performances.
+
+```{r, warning=FALSE, message=FALSE}
+
+rilevazione_per_giorno <- 24
+
+t <- nrow(y_train) # starting date of the prediction
+p <- 15*rilevazione_per_giorno # amount of data for the prediction (iperparametro KNN)
+k <- 5 # k (iperparametro KNN)
+h <- nrow(y_validation) # horizon - multistep (multioutput)
+
+count <- 0
+s <- ts
+query <- ts[(t-p):t]
+
+```
+
+Here the sequences that will be needed for the learning phase are created.
+
+```{r, warning=FALSE, message=FALSE}
+
+IXS <- numeric(k)
+while(count < k){
+  d.min <- Inf
+  for(ix in 1:(t-p-h)){
+    subsequence <- s[ix:(ix+p)]
+    d <- as.numeric(dist(rbind(subsequence, query)))
+    if(d < d.min){
+      d.min <- d
+      IXS[count + 1] <- ix
+    }
+  }
+  count <- count + 1
+  
+  s[IXS[count]:(IXS[count] + p)] <- Inf # This check is needed to avoid a repick of the same sequence
+}
+
+```
+
+In this chuck we execute the sub-sequence matching which will be used for the training phase.
+
+```{r}
+
+IXS <- IXS[which(IXS > 0)]
+for(i in 1:length(IXS)){
+  cat("Sottoseuquenza #",i,"identificata in [", IXS[i], ",", IXS[i] + p,"]\n")
+}
+```
+
+The following plot highlights the sequences that have been identified.
+
+```{r, warning=FALSE, message=FALSE}
+
+plot(c(ts[1:t], numeric(h) + NA), type = "l", lwd = 0.2)
+lines(ts[1:t], lwd = 0.2)
+
+for(i in 1:length(IXS)){
+  w <- IXS[i]:(IXS[i] + p)
+  lines(w, ts[w], col = "blue", lwd = 0.2)
+}
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+
+plot(c(ts[1:t], numeric(h) + NA), type = "l", lwd = 0.2)
+lines(ts[1:t], lwd = 0.2)
+
+for(i in 1:length(IXS)){
+  w <- IXS[i]:(IXS[i] + p)
+  lines(w, ts[w], col = "blue", lwd = 0.2)
+}
+
+futuri <- NULL
+for(i in 1:length(IXS)){
+  
+  w <- (IXS[i]+p+1):(IXS[i]+p+h)
+  lines(w, ts[w], col = "green", lwd = 0.2)
+  futuri <- rbind(futuri, ts[w])
+}
+
+```
+
+In the following chunk the prediction is calculated and plotted. The mean of the k-prediction made is computed. Another approach could be based on the median.
+
+```{r, warning=FALSE, message=FALSE}
+
+plot(c(ts[1:t], numeric(h) + NA), type = "l", lwd = 0.2)
+lines(ts[1:t], lwd = 0.2)
+
+for(i in 1:length(IXS)){
+  w <- IXS[i]:(IXS[i] + p)
+  lines(w, ts[w], col = "blue", lwd = 0.2)
+}
+
+futuri <- NULL
+for(i in 1:length(IXS)){
+  # p+1 is needed to start from the datapoint following the end of the training set
+  w <- (IXS[i]+p+1):(IXS[i]+p+h)
+  lines(w, ts[w], col = "green", lwd = 0.2)
+  futuri <- rbind(futuri, ts[w])
+}
+
+pred.m <- apply(futuri, 2, mean)
+lines((t+1):(t+h), pred.m, lwd = 0.2, lty = 2, col = "red")
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+plot(c(ts[1:t], numeric(h) + NA), type = "l", lwd = 0.22)
+lines(ts[1:t], lwd = 0.2)
+
+for(i in 1:length(IXS)){
+  w <- IXS[i]:(IXS[i] + p)
+  lines(w, ts[w], col = "blue", lwd = 0.2)
+}
+
+futuri <- NULL
+for(i in 1:length(IXS)){
+  
+  w <- (IXS[i]+p+1):(IXS[i]+p+h)
+  lines(w, ts[w], col = "green", lwd = 0.2)
+  futuri <- rbind(futuri, ts[w])
+}
+
+pred.md <- apply(futuri, 2, median)
+lines((t+1):(t+h), pred.m, lwd = 0.2, lty = 2, col = "red")
+
+if(nrow(futuri) > 1){
+  pred.sd <- apply(futuri,2,sd)
+  polygon(c((t+1):(t+h), (t+h):(t+1)), # <- Asse x
+          c(pred.m + pred.sd, rev(pred.m - pred.sd)),
+          col = adjustcolor("red", alpha.f = 0.1),
+          border = NA)
+}
+
+
+lines((t+1):(t+h), ts[(t+1):(t+h)], col = "black", lwd = 0.22)
+```
+
+The MAE seems to be of a comparable size to the ones obtained with the other models.
+Unless the next model will obtain significant improvements, it is much likely that this will be the final ML model.
+
+```{r}
+MAE.knn <- mean(abs(pred.m - ts[(t+1):(t+h)]))
+cat("MAE for KNN predictor: ", MAE.knn, "\n")
+```
+
+# GRU
+
+Since the parameters required for the GRU models are fewer the learning time should be less compared to the LSTM solution while obtaining similar performances.
+
+In order to avoid overfitting the dropout rate in the layers has been tuned to 0,3 .
+
+```{r, warning=FALSE, message=FALSE}
+batch.size <- 1462 #around 60 days
+model_gru <- keras_model_sequential()
+datalags <- 30
+
+model_gru %>%
+ layer_gru(units = 128,
+ input_shape = c(datalags, 1),
+ batch_size = batch.size,
+ return_sequences = TRUE,
+ stateful = TRUE) %>%
+ layer_dropout(rate = 0.3) %>%
+ layer_gru(units = 50,
+ return_sequences = FALSE,
+ stateful = TRUE) %>%
+ layer_dropout(rate = 0.3) %>%
+ layer_dense(units = 1)
+
+model_gru %>%
+ compile(loss = 'mae', optimizer = 'adam')
+```
+
+```{r, warning=FALSE, message=FALSE}
+model_gru
+```
+
+```{r, warning=FALSE, message=FALSE}
+model_gru %>% fit( x = x.train, y = y.train, batch_size = batch.size, epochs = 50,
+  verbose = getOption("keras.fit_verbose", default = 1))
+```
+
+```{r, warning=FALSE, message=FALSE}
+pred_gru <- model_gru %>% predict(x.validation, batch_size = batch.size) %>% .[,1]
+```
+
+```{r, warning=FALSE, message=FALSE}
+invisible(plot(y.validation, type = "l", lwd = 0.2, ylab = "Valore", xlab = "Data",
+     main = "Previsioni GRU"))
+lines(pred_gru, col = "red", lwd = 0.3)
+```
+
+```{r, warning=FALSE, message=FALSE}
+pred_gru_rescaled <- pred_gru*val[2] + val[1]
+y.validation_rescaled <- y.validation*val[2] + val[1]
+```
+
+```{r}
+MAE.gru <- mean(abs(pred_gru_rescaled - y.validation_rescaled))
+cat("MAE for GRU predictor: ", MAE.gru, "\n")
+```
+
+As expected the performances obtained by the GRU models were worst than the ones of the KNN, returning almost two times the MAE.
+
+# KNN Total Training
+
+The whole process already seen above during the training phase.
+
+```{r, warning=FALSE, message=FALSE}
+t <- nrow(y) # new lenght
+p <- 15*rilevazione_per_giorno 
+k <- 5 
+h <- 61*rilevazione_per_giorno 
+```
+
+```{r, warning=FALSE, message=FALSE}
+count <- 0
+s <- ts
+query <- ts[(t-p):t]
+```
+
+```{r, warning=FALSE, message=FALSE}
+IXS <- numeric(k)
+while(count < k){
+  d.min <- Inf
+  for(ix in 1:(t-p-h)){
+    subsequence <- s[ix:(ix+p)]
+    d <- as.numeric(dist(rbind(subsequence, query)))
+    if(d < d.min){
+      d.min <- d
+      IXS[count + 1] <- ix
+    }
+  }
+  count <- count + 1
+  s[IXS[count]:(IXS[count] + p)] <- Inf
+}
+```
+
+```{r, warning=FALSE, message=FALSE}
+IXS <- IXS[which(IXS > 0)]
+
+for(i in 1:length(IXS)){
+  cat("Sottoseuquenza #",i,"identificata in [", IXS[i], ",", IXS[i] + p,"]\n")
+}
+```
+By using the whole time series available, the algorithm was able to find different sub-sequences.
+
+```{r, warning=FALSE, message=FALSE}
+plot(c(ts[1:t], numeric(h) + NA), type = "l", lwd = 0.2)
+lines(ts[1:t], lwd = 0.2)
+
+for(i in 1:length(IXS)){
+  w <- IXS[i]:(IXS[i] + p)
+  lines(w, ts[w], col = "blue", lwd = 0.2)
+}
+
+futuri_best <- NULL
+for(i in 1:length(IXS)){
+  w <- (IXS[i]+p+1):(IXS[i]+p+h)
+  lines(w, ts[w], col = "green", lwd = 0.2)
+  futuri_best <- rbind(futuri_best, ts[w])
+}
+
+pred_ml_best <- apply(futuri_best, 2, mean)
+lines((t+1):(t+h), pred_ml_best, lwd = 0.2, lty = 2, col = "red")
+```
+
+```{r}
+ML <- t(t(pred_ml_best))
+```
+
+```{r, warning=FALSE, message=FALSE}
+Dati <- read.csv("C:\\Users\\jacop\\Desktop\\Time Series\\Progetto Jaco\\SDMTSA_861812.csv")
+Dati$date <- as.Date(as.character(Dati$date), format = "%m/%d/%Y")
+```
+
+```{r, warning=FALSE, message=FALSE}
+dff <- cbind(Dati,ML)
+```
+
+
+# Final MAE:
+
+$Arima: 621650.9$
+
+$UCM: 356025.4$
+
+$ML-KNN: 563666.9$
+
+
+
+
+
+
+
